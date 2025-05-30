@@ -1,0 +1,15 @@
+jupyter
+beancount
+pandas
+numpy
+requests
+beautifulsoup4
+lxml
+pdfplumber
+pytz
+python-dotenv
+openai
+pathlib
+fuzzywuzzy
+scikit-learn
+fava

@@ -30,6 +30,8 @@ model = "llama3.1"
 headers = {"Content-Type": "application/json"}
 input_dir = "/home/errol/beancount/importer/00_inputs"
 output_dir = "/home/errol/beancount/importer/01_outputs"
+bean_accounts_file= '/home/errol/beancount/ledger_prod/main.bean'
+bean_transactions_file = '/home/errol/beancount/ledger_prod/main.bean'
 os.makedirs(output_dir, exist_ok=True)
 start_date = "2025-03-22"
 end_date = "2025-05-31"
@@ -122,7 +124,6 @@ def process_page(text: str, url: str, headers: dict) -> List[dict]:
         print(f"Error processing page: {e}")
         return []
     
-
 def import_csv_amazon(file_path):
     """Import Amazon Orders purchased with Gift Cards from csv file of Amazon Order history from "Amazon Order History Reporter" Chrome Extension into a standardized DataFrame."""
     if "Amazon" not in os.path.basename(file_path):
@@ -166,6 +167,33 @@ def import_csv_amazon(file_path):
 
         return standardized_df
 
+    except FileNotFoundError:
+        print(f"Error: The file {file_path} was not found.")
+    except pd.errors.EmptyDataError:
+        print("Error: The file is empty.")
+    except KeyError as e:
+        print(f"Error: Missing expected column in CSV: {e}")
+    except Exception as e:
+        print(f"An error occurred: {e}")
+        return None  # Return None to indicate failure
+    
+def import_csv_amex(file_path):
+    """
+    Import American Express CSV file and return a standarised DataFrame.
+    """
+    if "Amex" not in os.path.basename(file_path):
+       print(f"Skipping file {file_path} as it is not an Amex CSV file.")
+       return None
+    try: 
+        df = pd.read_csv(file_path)
+        # df['Date'] = pd.to_datetime(df['Date'], format="%Y-%m-%d", errors="coerce")
+        df['Date'] = pd.to_datetime(df['Date'], format="%d/%m/%Y", errors="coerce").dt.strftime("%Y-%m-%d")
+        df['Date Processed'] = pd.to_datetime(df['Date Processed'], format="%d/%m/%Y", errors="coerce").dt.strftime("%Y-%m-%d")
+        df['Amount'] = pd.to_numeric(-df['Amount'], errors="coerce").fillna(0)
+        
+        standardized_df = df[['Date', 'Description', 'Amount']]
+        return standardized_df
+    
     except FileNotFoundError:
         print(f"Error: The file {file_path} was not found.")
     except pd.errors.EmptyDataError:
@@ -466,7 +494,7 @@ def process_file(file_path: str) -> None:
                     continue
             all_transactions.extend(page_results)
                 
-    elif file_ext == '.csv':
+    elif "Amazon" in file_name and file_ext == '.csv':
         df = import_csv_amazon(file_path)
         if df is not None:
             csv_transactions = df.to_dict('records')
@@ -474,7 +502,17 @@ def process_file(file_path: str) -> None:
                 trans['Date'] = trans['Date'].strftime('%Y-%m-%d')
                 trans['Source'] = 'Amazon'
             all_transactions.extend(csv_transactions)
-            
+
+    elif "Amex" in file_name and file_ext == '.csv':
+        print("Processing Amex CSV file: ", file_path)
+        df = import_csv_amex(file_path)
+        if df is not None:
+            csv_transactions = df.to_dict('records')
+            for trans in csv_transactions:
+                trans["Date"] = trans["Date"]
+                trans['Source'] = 'Amex'
+            all_transactions.extend(csv_transactions)    
+
     elif file_ext == '.json':
         print(f"Processing Woolworths JSON file: {file_path}")
         df = import_json_woolworths(file_path, start_date, end_date)
@@ -687,6 +725,7 @@ def create_beancount_entries(
         transactions = json.load(f)
 
     for txn in transactions:
+        # print(f"Processing transaction: {txn['Description']} on {txn['Date']}")
         txn_date = datetime.strptime(txn['Date'], '%Y-%m-%d').date()
         description = txn['Description'].strip()
         txn_url = txn['URL']
@@ -741,7 +780,8 @@ ACCOUNT_MAPPING = {
   'Westpac Blow-524631': 'Assets:00-Personal:00-Current-Assets:Westpac:Blow-524631',
   'Westpac Joint-785669': 'Assets:01-Joint:00-Current-Assets:Westpac:Joint-785669',
   'Westpac Loan-343233': 'Liabilities:01-Joint:Westpac:Pyrus-Loan',
-  'Woolworths-receipt': 'Assets:00-Personal:10-Non-Current-Assets:Gift-Cards:Woolworths'
+  'Woolworths-receipt': 'Assets:00-Personal:10-Non-Current-Assets:Gift-Cards:Woolworths',
+  'Deloitte-Amex': 'Liabilities:00-Personal:AMEX:Deloitte-Credit-51006'
 }
 
 if __name__ == "__main__":

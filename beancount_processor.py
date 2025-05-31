@@ -649,7 +649,6 @@ def classify_expense(description: str, url: str, headers: dict, expense_accounts
     except Exception as e:
         print(f"Error classifying transaction: {e}")
         return 'Expenses:FIXME'
-    
 
 def create_beancount_entries(
     json_file: str,
@@ -735,8 +734,6 @@ def create_beancount_entries(
 
     print(f"Beancount entries written to {output_file}")
 
-
-
 ACCOUNT_MAPPING = {
   'Amazon-order-history': 'Assets:00-Personal:10-Non-Current-Assets:Gift-Cards:Amazon',
   'ING Blow-32970834': 'Assets:00-Personal:00-Current-Assets:ING:Blow-32970834',
@@ -754,7 +751,7 @@ if __name__ == "__main__":
     # Step 2: Process transactions into Beancount format
     input_dir = '/home/errol/beancount/importer/01_outputs'  # Directory containing JSON files
     output_dir = '/home/errol/beancount/importer/02_beancount'
-    bean_accounts_file= '/home/errol/beancount/ledger_prod/accounts.bean'
+    bean_accounts_file= '/home/errol/beancount/ledger_prod/main.bean'
     bean_transactions_file = '/home/errol/beancount/ledger_prod/main.bean'
 
     # Ensure the output directory exists

@@ -4,6 +4,7 @@ Beancount transaction processor
 This script processes monthly transactions.
 """
 
+import re
 import os
 import pathlib
 import glob
@@ -13,7 +14,6 @@ import requests
 from typing import List
 from datetime import datetime
 import pytz
-import re
 import pdfplumber
 from beancount.core import data, amount
 from beancount.core.number import Decimal
@@ -24,13 +24,15 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import numpy as np
 
-# Setup virtual environment
-# python3 -m venv beancount-venv
-# source beancount-venv/bin/activate
-
-# Install Python Pre-requisites
-# pip install --upgrade pip
-# pip install -r /home/errol/beancount/importer/requirements.txt
+# Configuration variables
+url = "http://192.168.5.44:11434/api/generate"
+model = "llama3.1"
+headers = {"Content-Type": "application/json"}
+input_dir = "/home/errol/beancount/importer/00_inputs"
+output_dir = "/home/errol/beancount/importer/01_outputs"
+os.makedirs(output_dir, exist_ok=True)
+start_date = "2025-03-22"
+end_date = "2025-05-31"
 
 # Define source file extraction functions
 def extract_text_from_pdf(pdf_path: str) -> List[str]:
@@ -179,6 +181,8 @@ def import_json_woolworths(file_path, start_date=None, end_date=None):
     Extracts transaction details, receipt totals, and amounts paid by gift cards from Woolworths JSON data.
     Optionally filters transactions based on a start and end date.
 
+    For connector_version 3.2.0, where the download is an object with numbered keys.
+
     Args:
         file_path (str): Path to the JSON file.
         start_date (str): Start date in "YYYY-MM-DD" format (optional).
@@ -190,11 +194,51 @@ def import_json_woolworths(file_path, start_date=None, end_date=None):
     try:
         with open(file_path, "r") as file:
             data = json.load(file)
-
+        
+        connector_ver = data.get("connector_ver", None)
+        if connector_ver != "3.2.0":
+            print(f"Warning: Expected connector version 3.2.0, but found {connector_ver}. This function is designed for that version.")
+            return None
+        
         transactions = []
         perth_tz = pytz.timezone("Australia/Perth")  # Define Perth timezone
 
-        for entry in data.get("download", []):
+        # Handle the new structure where download is an object with numbered keys
+        download_data = data.get("download", {})
+
+        # print(f"Download data type: {type(download_data)}")
+        # Convert the numbered keys to a list of entries
+        entries = []
+        if isinstance(download_data, dict):
+            # Sort by key to maintain order
+            for key in sorted(download_data.keys(), key=lambda x: int(x) if x.isdigit() else float('inf')):
+                if isinstance(download_data[key], dict):
+                    entries.append(download_data[key])
+                    # print(f"Added entry for key {key}: {download_data[key]}")
+        elif isinstance(download_data, list):
+            # Fallback for old structure
+            entries = download_data
+
+        print(f"Download data type: {type(entries)}")
+        print(f"Number of entries found: {len(entries)}")
+        # print(entries)
+
+        capture_time = data.get("captureTime", None)
+        print(f"Capture Time: {capture_time}")
+
+        # Parse captureTime to use as the reference datetime
+        reference_datetime = None
+        if capture_time:
+            try:
+                reference_datetime = datetime.fromisoformat(capture_time.replace("Z", "+00:00")).astimezone(perth_tz)
+            except Exception as e:
+                print(f"Error parsing captureTime: {e}")
+
+        for entry in entries:
+            # Skip entries that don't have the required structure
+            if not isinstance(entry, dict):
+                continue
+                
             # Extract transaction-level details with safe default values
             transaction_id = entry.get("id", None)
             display_date = entry.get("displayDate", None)
@@ -202,20 +246,35 @@ def import_json_woolworths(file_path, start_date=None, end_date=None):
             description = entry.get("description", None)
             transaction = entry.get("transaction", {})
             transaction_type = entry.get("transactionType", None)
-            amount = transaction.get("amountAsDollars", "").replace("$", "") if transaction else None
-            origin = transaction.get("origin", None) if transaction else None
-            capture_time = entry.get("captureTime", None)
 
-            # Parse captureTime to use as the reference datetime
-            reference_datetime = None
-            if capture_time:
-                try:
-                    reference_datetime = datetime.fromisoformat(capture_time.replace("Z", "+00:00")).astimezone(perth_tz)
-                except Exception as e:
-                    print(f"Error parsing captureTime for entry {transaction_id}: {e}")
+            # print(f"Processing entry with ID: {transaction_id}, Type: {transaction_type}, Title: {title}")
+            
+            # Skip non-purchase transactions
+            if transaction_type != "purchase":
+                continue
+                
+            # Extract amount from description if transaction is missing amountAsDollars
+            amount = None
+            if transaction and isinstance(transaction, dict):
+                amount = transaction.get("amountAsDollars", "").replace("$", "") if transaction.get("amountAsDollars") else None
+
+            # If no amount in transaction, try to extract from description
+            if not amount and description:
+                # Look for pattern like "$123.45" in description
+                amount_match = re.search(r'\$(\d+\.\d+)', description)
+                if amount_match:
+                    amount = amount_match.group(1)
+            
+            origin = transaction.get("origin", None) if transaction else None
+            # scraper = entry.get("scraper", {})
+            # print(f"entry = {entry}")
+            # print(f"scraper = {scraper}")
+            # capture_time = entry.get("scraper",{}).get("captureTime",None)
+ 
 
             # Determine the transaction date using Display Date and Title
             transaction_date = None
+            # print(f"Display Date: {display_date}, Title: {title}, Reference Datetime: {reference_datetime}")
             if display_date and reference_datetime:
                 try:
                     # Parse day and month from display_date
@@ -245,76 +304,107 @@ def import_json_woolworths(file_path, start_date=None, end_date=None):
                                 transaction_date = day_month.replace(year=year, month=month)
                         except ValueError:
                             pass  # Ignore invalid formats
+                    print(f"Transaction date for entry {transaction_id}: {transaction_date}")
                 except Exception as e:
-                    print(f"Error parsing transaction date for entry {transaction_id}: {e}")
+                    print(f"Error parsing transaction date for entry {description}: {e}")
 
             # Extract eReceipt details safely
             ereceipt = entry.get("ereceipt", {}).get("activityDetails", {}).get("tabs", [])
             gift_card_payment = 0
             receipt_total = 0
 
-            if ereceipt:
-                receipt_details = ereceipt[0].get("page", {}).get("details", [])
+            # print(f"ereceipt = {ereceipt}")
 
+            if ereceipt:
+                # print(f"eReceipt found for transaction {transaction_id}")
+                receipt_details = list(ereceipt['0'].get("page", {}).get("details", {}).values())
+                # print(f"Receipt details: {receipt_details}") 
                 # Extract Receipt Total
                 for detail in receipt_details:
                     if detail.get("__typename") == "ReceiptDetailsTotal":
                         receipt_total = float(detail.get("total", "0").replace("$", ""))
                         break
-
-                # Extract Gift Card Payments
-                payments = ereceipt[0].get("page", {}).get("details", [])
-                for payment in payments:
+            # Extract Gift Card Payments
+                for payment in receipt_details:
+                    # print(f"Payment details: {payment}")
                     if payment.get("__typename") == "ReceiptDetailsPayments":
-                        for method in payment.get("payments", []):
+                        # Payments is also an object with numbered keys, convert to list
+                        payment_methods = list(payment.get("payments", {}).values())
+                        for method in payment_methods:
                             payment_description = method.get("description", "") or ""
                             alt_text = method.get("altText", "") or ""
 
                             # Check if "Gift" exists in either description or altText
                             if "Gift" in payment_description or "Gift" in alt_text:
                                 gift_card_payment += float(method.get("amount", "0").replace("$", ""))
+                
+            # Only add transactions with valid amounts
+            if amount:
+                # print(f"Amount = {amount}") 
+                # print(f"Amount type: {type(amount)}")
+                # print(f"Amount as float: {float(amount)}")
+                try:
+                    amount_float = float(amount)
+                    # print(amount_float)
+                    transactions.append({
+                        "TransactionID": transaction_id,
+                        "TransactionType": transaction_type,
+                        "Title": title,
+                        "Date": transaction_date.strftime("%Y-%m-%d") if transaction_date else None,
+                        "DisplayDate": display_date,
+                        "Description": description,
+                        "Origin": origin,
+                        "TotalAmount": receipt_total if receipt_total > 0 else amount_float,
+                        "Amount": gift_card_payment if gift_card_payment > 0 else 0,
+                    })
+                    # print(f"Added transaction {transaction_id} with amount {amount_float}")
+                except ValueError:
+                    print(f"Warning: Could not parse amount '{amount}' for transaction {transaction_id}")
+                    continue
+            else:
+                print(f"Warning: No valid amount found for transaction {transaction_id}")
 
-            transactions.append({
-                "TransactionID": transaction_id,
-                "TransactionType": transaction_type,
-                "Title": title,
-                "Date": transaction_date.strftime("%Y-%m-%d") if transaction_date else None,
-                "DisplayDate": display_date,
-                "Description": description,
-                "Origin": origin,
-                "TotalAmount": receipt_total,
-                "Amount": gift_card_payment,
-            })
+        # print(f"Transactions = {transactions}")
+        # print(f"Number of transactions found: {len(transactions)}")
+        # print(f"Transactions type: {type(transactions)}")
 
         # Convert the list of transactions to a DataFrame
         df = pd.DataFrame(transactions)
+
+        # print(df)
+        
+        if df.empty:
+            print("No valid transactions found in the file")
+            return df
 
         # Format the Date column to a datetime type
         df['Date'] = pd.to_datetime(df['Date'], format="%Y-%m-%d", errors="coerce")
 
         # Standardize the DataFrame
-        standardized_df = df[['Date', 'Description', 'Amount', 'TotalAmount', 'Origin']]
-        # Filter rows and create a new copy of the DataFrame
-        standardized_df = standardized_df[standardized_df['Amount'] > 0]
+        standardized_df = df[['Date', 'Description', 'Amount', 'TotalAmount', 'Origin']].copy()
+        # print(f"Standardized DataFrame:\n{standardized_df}") 
+        # Filter rows where gift card payments were made (Amount > 0)
+        standardized_df = standardized_df[standardized_df['Amount'] > 0].copy()
 
-        # Modify the 'Amount' column safely
-        standardized_df['Amount'] = -standardized_df['Amount']  # Convert Gift Card payments to negative amounts
+        # Convert Gift Card payments to negative amounts (expenses)
+        if not standardized_df.empty:
+            standardized_df['Amount'] = -standardized_df['Amount']
 
         # Apply the date filter on the standardized DataFrame
         if start_date:
-            start_date = datetime.strptime(start_date, "%Y-%m-%d").date()
-            standardized_df = standardized_df[standardized_df['Date'] >= start_date.isoformat()]
+            start_date_obj = pd.to_datetime(start_date)
+            standardized_df = standardized_df[standardized_df['Date'] >= start_date_obj]
         if end_date:
-            end_date = datetime.strptime(end_date, "%Y-%m-%d").date()
-            standardized_df = standardized_df[standardized_df['Date'] <= end_date.isoformat()]
+            end_date_obj = pd.to_datetime(end_date)
+            standardized_df = standardized_df[standardized_df['Date'] <= end_date_obj]
 
         return standardized_df
+        # return entries
 
     except Exception as e:
         print(f"An error occurred: {e}")
-        return None
+        return None                
 
-# Extract transactions into JSON
 def standardize_transactions(transactions: list) -> list:
     """Standardize transaction format for both PDF and CSV sources"""
     standardized = []
@@ -542,10 +632,10 @@ def classify_expense(description: str, url: str, headers: dict, expense_accounts
             category = full_response.strip()
             
             # Debug output
-            print(f"Raw response: '{full_response}'")
-            print(f"Cleaned category: '{category}'")
-            print(f"Is in expense_accounts: {category in expense_accounts}")
-            print(f"Available accounts: {expense_accounts}")
+            # print(f"Raw response: '{full_response}'")
+            # print(f"Cleaned category: '{category}'")
+            # print(f"Is in expense_accounts: {category in expense_accounts}")
+            # print(f"Available accounts: {expense_accounts}")
             
             return category if category in expense_accounts else 'Expenses:FIXME'
     except Exception as e:
@@ -637,15 +727,7 @@ def create_beancount_entries(
 
     print(f"Beancount entries written to {output_file}")
 
-# Configuration variables
-url = "http://192.168.5.44:11434/api/generate"
-model = "llama3.1"
-headers = {"Content-Type": "application/json"}
-input_dir = "/home/errol/beancount/importer/00_inputs"
-output_dir = "/home/errol/beancount/importer/01_outputs"
-os.makedirs(output_dir, exist_ok=True)
-start_date = "2025-03-22"
-end_date = "2025-05-31"
+
 
 ACCOUNT_MAPPING = {
   'Amazon-order-history': 'Assets:00-Personal:10-Non-Current-Assets:Gift-Cards:Amazon',

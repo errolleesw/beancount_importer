@@ -42,7 +42,7 @@ def extract_text_from_pdf(pdf_path: str) -> List[str]:
     with pdfplumber.open(pdf_path) as pdf:
         print(f"Processing PDF with {len(pdf.pages)} pages...")
         for page_num, page in enumerate(pdf.pages, 1):
-            print(f"Extracting text from page {page_num}...")
+            # print(f"Extracting text from page {page_num}...")
             text = page.extract_text()
             if text.strip():  # Only add non-empty pages
                 page_contents.append(text)
@@ -52,7 +52,7 @@ def extract_text_from_pdf(pdf_path: str) -> List[str]:
 def process_page(text: str, url: str, headers: dict) -> List[dict]:
     """Process a single page of text through Ollama with strict JSON validation"""
     prompt = f"""
-    Extract all transactions from this Westpac bank statement page.
+    Extract all transactions from this bank statement page.
     Respond ONLY with a JSON array. Each object in the array must have these exact properties:
     [
         {{"Date": "YYYY-MM-DD", "Description": "string", "Amount": number}}
@@ -304,7 +304,7 @@ def import_json_woolworths(file_path, start_date=None, end_date=None):
                                 transaction_date = day_month.replace(year=year, month=month)
                         except ValueError:
                             pass  # Ignore invalid formats
-                    print(f"Transaction date for entry {transaction_id}: {transaction_date}")
+                    # print(f"Transaction date for entry {transaction_id}: {transaction_date}")
                 except Exception as e:
                     print(f"Error parsing transaction date for entry {description}: {e}")
 
@@ -446,11 +446,19 @@ def process_file(file_path: str) -> None:
                 for transaction in page_results:
                     try:
                         date_str = transaction['Date']
-                    # Handle both 'dd mmm yyyy' and 'dd-mmm-yyyy' formats
-                        if '-' in date_str:
-                            date_obj = datetime.strptime(date_str, '%d-%b-%Y')
-                        else:
-                            date_obj = datetime.strptime(date_str, '%d %b %Y')
+                        # Try multiple date formats
+                        date_obj = None
+                        for fmt in ('%d-%b-%Y', '%d %b %Y', '%d %b %y','$d-%b-%y','%Y-%m-%d','%d-%m-%Y'):
+                            try:
+                                date_obj = datetime.strptime(date_str, fmt)
+                                # If year is 2-digit, convert to 4-digit (assume 2000+)
+                                if fmt == '%d %b %y' and date_obj.year < 100:
+                                    date_obj = date_obj.replace(year=2000 + date_obj.year)
+                                break
+                            except ValueError:
+                                continue
+                        if date_obj is None:
+                            raise ValueError(f"Unrecognized date format: {date_str}")
                         transaction['Date'] = date_obj.strftime('%Y-%m-%d')
                         transaction['Source'] = 'Westpac'
                     except ValueError as e:
@@ -583,7 +591,7 @@ def find_matching_transactions(beanfile_path, new_transaction_desc, threshold=0.
     # Sort by similarity score in descending order
     matching_transactions.sort(key=lambda x: x[1], reverse=True)
     
-    print(f"\nFound {len(matching_transactions)} matching transactions for '{new_transaction_desc}'")
+    # print(f"\nFound {len(matching_transactions)} matching transactions for '{new_transaction_desc}'")
     return matching_transactions
 
 def classify_expense(description: str, url: str, headers: dict, expense_accounts: set, matching_transactions: list) -> str:
